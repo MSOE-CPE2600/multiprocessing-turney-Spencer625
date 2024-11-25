@@ -16,7 +16,7 @@ If you are the child node, you generate the image. The modified generation state
 If you are the parent node, you iterate through the for loop once again making another child node. This repeats, increasing the number of child nodes until you are stopped by sem_wait, which means that the maximum number of child nodes is currently working. When sem_post is reached within a child process, the parent is allowed to make another child. The patient continues until all 0 - x numbers of frames are generated. At this point, the parent node waits for all child processes. Afterward, we close the Semaphore and unlink it.
 
 ## Runtime results
-![Alt text](Runtime Vs Child Processes.png)
+![Alt text](Runtime_Vs_Child_Processes.png)
 
 
 The figure above shows the Runtime over the number of Child processes for our default case, an "infinite" loop in Seahorse Valley. The trend line for the graph reveals that this is an Inverse Relationship between the Runtime number of Child processes. Our R^2 value tells us that the equation found in the figure is a good fit for predicting future values.
