@@ -17,11 +17,24 @@
 #include <semaphore.h>
 #include <fcntl.h>
 #include "jpegrw.h"
+#include <pthread.h>
 
-static void compute_image(imgRawImage *img, double xmin, double xmax, double ymin, double ymax, int max);
+
+static void compute_image(imgRawImage *img, double xmin, double xmax, double ymin, double ymax, int max, int num_threads);
 static int iteration_to_color(int i, int max);
 static int iterations_at_point(double x, double y, int max);
 static void show_help();
+
+typedef struct {
+    imgRawImage *img;
+    int start_row;
+    int end_row;
+    double xmin;
+    double xmax;
+    double ymin;
+    double ymax;
+    int max;
+} ThreadData;
 
 int main(int argc, char *argv[]) {
     char c;
@@ -39,9 +52,10 @@ int main(int argc, char *argv[]) {
     int total_frames = 50; // Default number of frames
     int max = 1000; // Default number of iterations per point
     int num_children = 4;  // Default number of child processes
+    int num_threads = 4; // Default number of threads 
 
     // Parse command-line options
-    while ((c = getopt(argc, argv, "x:y:s:X:Y:z:W:H:m:c:f:h")) != -1) {
+    while ((c = getopt(argc, argv, "x:y:s:X:Y:z:W:H:m:c:t:f:h")) != -1) {
         switch (c) {
             case 'x': // X coordinate of image center
                 xcenter = atof(optarg);
@@ -72,6 +86,13 @@ int main(int argc, char *argv[]) {
                 break;
             case 'c': // Number of child processes
                 num_children = atoi(optarg);
+                break;
+            case 't': // Number of threads
+                num_threads = atoi(optarg);
+                if (num_threads < 1 || num_threads > 20) {
+                    printf("Number of threads must be between 1 and 20.\n");
+                    exit(1);
+                }
                 break;
             case 'f': // Number of frames
                 total_frames = atoi(optarg);
@@ -127,8 +148,7 @@ int main(int argc, char *argv[]) {
 	        setImageCOLOR(img,0);
 
 	        // Compute the Mandelbrot image
-	        compute_image(img,xcenter-xscale/2,xcenter+xscale/2,ycenter-yscale/2,ycenter+yscale/2,max);
-
+	        compute_image(img, xcenter - xscale / 2, xcenter + xscale / 2, ycenter - yscale / 2, ycenter + yscale / 2, max, num_threads);
 	        // Save the image in the stated file.
 	        storeJpegImageFile(img,outfile);
 
@@ -181,31 +201,85 @@ Compute an entire Mandelbrot image, writing each point to the given bitmap.
 Scale the image to the range (xmin-xmax,ymin-ymax), limiting iterations to "max"
 */
 
-void compute_image(imgRawImage* img, double xmin, double xmax, double ymin, double ymax, int max )
-{
-	int i,j;
+void *compute_region(void *arg) {
+    // Cast the argument to a ThreadData pointer to access thread-specific data
+    ThreadData *data = (ThreadData *)arg;
 
-	int width = img->width;
-	int height = img->height;
+    // Extract the imgRawImage pointer from the ThreadData structure
+    imgRawImage *img = (*data).img;
 
-	// For every pixel in the image...
-
-	for(j=0;j<height;j++) {
-
-		for(i=0;i<width;i++) {
-
-			// Determine the point in x,y space for that pixel.
-			double x = xmin + i*(xmax-xmin)/width;
-			double y = ymin + j*(ymax-ymin)/height;
-
-			// Compute the iterations at that point.
-			int iters = iterations_at_point(x,y,max);
-
-			// Set the pixel in the bitmap.
-			setPixelCOLOR(img,i,j,iteration_to_color(iters,max));
-		}
-	}
+    // Iterate over the range of rows assigned to this thread
+    for (int j = (*data).start_row; j < (*data).end_row; j++) {
+        // Iterate over all columns in the image
+        for (int i = 0; i < (*img).width; i++) {
+            // Calculate the x-coordinate in the fractal's space corresponding to the current column
+            double x = (*data).xmin + i * ((*data).xmax - (*data).xmin) / (*img).width; 
+            
+            // Calculate the y-coordinate in the fractal's space corresponding to the current row
+            double y = (*data).ymin + j * ((*data).ymax - (*data).ymin) / (*img).height; 
+            
+            // Determine the number of iterations for the point (x, y) in the fractal computation
+            int iters = iterations_at_point(x, y, (*data).max); 
+            
+            // Map the iteration count to a color and set the pixel color in the image
+            setPixelCOLOR(img, i, j, iteration_to_color(iters, (*data).max));
+        }
+    }
+    return NULL;
 }
+
+void compute_image(imgRawImage *img, double xmin, double xmax, double ymin, double ymax, int max, int num_threads) {
+    // Array to hold thread identifiers
+    pthread_t threads[num_threads];
+    
+    // Array to hold thread-specific data for each thread
+    ThreadData thread_data[num_threads];
+
+    // Divide the image height into base rows per thread
+    int rows_per_thread = (*img).height / num_threads;
+
+    // Calculate the number of leftover rows that need to be handled by the first threads
+    int leftover_rows = (*img).height % num_threads;
+
+    // Create threads and assign each a portion of the computation
+    int current_start_row = 0;  // Keep track of the current starting row
+
+    for (int t = 0; t < num_threads; t++) {
+        // Calculate the number of rows for this thread
+        int rows_for_thread = rows_per_thread;
+
+        // If there are leftover rows, give the first 'leftover_rows' threads one extra row
+        if (t < leftover_rows) {
+            rows_for_thread++;  // Give one extra row to this thread
+        }
+
+        // Calculate the start and end rows for this thread
+        thread_data[t] = (ThreadData){
+            .img = img, // Pointer to the shared image
+            .start_row = current_start_row, // Starting row for this thread
+            .end_row = current_start_row + rows_for_thread, // Ending row for this thread
+            .xmin = xmin, // Minimum x-coordinate of the fractal region
+            .xmax = xmax, // Maximum x-coordinate of the fractal region
+            .ymin = ymin, // Minimum y-coordinate of the fractal region
+            .ymax = ymax, // Maximum y-coordinate of the fractal region
+            .max = max // Maximum number of iterations for the fractal
+        };
+
+        // Update the starting row for the next thread
+        current_start_row += rows_for_thread;
+
+        // Create a thread and pass it the compute_region function and its data
+        pthread_create(&threads[t], NULL, compute_region, &thread_data[t]);
+    }
+
+    // Wait for all threads to complete before proceeding
+    for (int t = 0; t < num_threads; t++) {
+        pthread_join(threads[t], NULL);
+    }
+}
+
+
+
 
 /*
 Convert a iteration number to a color.
@@ -230,6 +304,7 @@ void show_help() {
     printf("-W <pixels>  Width of the image in pixels (default=1920)\n");
     printf("-H <pixels>  Height of the image in pixels (default=1080)\n");
     printf("-m <max>     Max iterations per point (default=1000)\n");
-    printf("-c <num>     Number of child processes (default=5)\n");
+    printf("-c <num>     Number of child processes (default=4)\n");
+    printf("-t <num>     Number of threads (default=5)\n");
     printf("-h           Show this help message\n");
 }
